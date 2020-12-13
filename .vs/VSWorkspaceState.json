@@ -1,0 +1,12 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\libraries",
+    "\\libraries\\AP_Motors",
+    "\\modules\\waf\\utils\\launcher",
+    "\\modules\\waf\\utils\\launcher\\Backup",
+    "\\modules\\waf\\utils\\launcher\\waf-launcher"
+  ],
+  "SelectedNode": "\\libraries\\AP_Motors\\AP_MotorsHeli_Dual.h",
+  "PreviewInSolutionExplorer": false
+}
