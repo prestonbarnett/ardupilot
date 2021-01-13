@@ -35,9 +35,6 @@
 
 #include <stdio.h>
 
-#include <AP_PiccoloCAN/piccolo_protocol/ESCVelocityProtocol.h>
-#include <AP_PiccoloCAN/piccolo_protocol/ESCPackets.h>
-
 extern const AP_HAL::HAL& hal;
 
 #define debug_can(level_debug, fmt, args...) do { AP::can().log_text(level_debug, "PiccoloCAN", fmt, ##args); } while (0)
@@ -132,20 +129,18 @@ void AP_PiccoloCAN::init(uint8_t driver_index, bool enable_filters)
 // loop to send output to CAN devices in background thread
 void AP_PiccoloCAN::loop()
 {
-    AP_HAL::CANFrame txFrame;
     AP_HAL::CANFrame rxFrame;
 
-    uint16_t esc_tx_counter = 0;
 
     // CAN Frame ID components
-    uint8_t frame_id_group;     // Piccolo message group
+    // uint8_t frame_id_group;     // Piccolo message group
     uint16_t frame_id_device;   // Device identifier
+
+    uint64_t timeout;
 
     while (true) {
 
         _esc_hz = constrain_int16(_esc_hz, PICCOLO_MSG_RATE_HZ_MIN, PICCOLO_MSG_RATE_HZ_MAX);
-
-        uint16_t escCmdRateMs = (uint16_t) ((float) 1000 / _esc_hz);
 
         if (!_initialized) {
             debug_can(AP_CANManager::LOG_ERROR, "PiccoloCAN: not initialized\n\r");
@@ -153,48 +148,111 @@ void AP_PiccoloCAN::loop()
             continue;
         }
 
-        uint64_t timeout = AP_HAL::micros64() + 250ULL;
+        timeout = AP_HAL::micros64() + 250;
+
+        bool result = true;
 
         // 1ms loop delay
-        hal.scheduler->delay_microseconds(1000);
+        hal.scheduler->delay_microseconds(1 * 1000);
 
-        // Transmit ESC commands at regular intervals
-        if (esc_tx_counter++ > escCmdRateMs) {
-            esc_tx_counter = 0;
-
-            send_esc_messages();
-        }
+        send_esc_messages();
 
         // Look for any message responses on the CAN bus
         while (read_frame(rxFrame, timeout)) {
 
-            // Extract group and device ID values from the frame identifier
-            frame_id_group = (rxFrame.id >> 24) & 0x1F;
-            frame_id_device = (rxFrame.id >> 8) & 0xFF;
+            frame_id_device = rxFrame.id & 0x7FF;
 
             // Only accept extended messages
             if ((rxFrame.id & AP_HAL::CANFrame::FlagEFF) == 0) {
                 continue;
             }
 
-            switch (MessageGroup(frame_id_group)) {
-            // ESC messages exist in the ACTUATOR group
-            case MessageGroup::ACTUATOR:
+            // Check Arbitration IDs to get the telemetry data needed
 
-                switch (ActuatorType(frame_id_device)) {
-                case ActuatorType::ESC:
-                    if (handle_esc_message(rxFrame)) {
-                        // Returns true if the message was successfully decoded
-                    }
-                    break;
-                default:
-                    // Unknown actuator type
-                    break;
-                }
+            // TELEMETRY VARIABLES                                                               UNIT CONVERSION
 
-                break;
-            default:
-                break;
+            if (frame_id_device == TELEM_1) {
+
+                motor_reply_data1_t reply_data;
+                memcpy(reply_data.data, rxFrame.data, sizeof(reply_data.data));
+
+                _telemetry.rpm = reply_data.rpm;
+                _telemetry.ignition_angle = (float)reply_data.ignition_angle                        / 10.0f;
+                _telemetry.throttle_angle = (float)reply_data.throttle_angle                        / 10.0f;
+                _telemetry.lambda = reply_data.lambda;
+
+            } else if (frame_id_device == TELEM_2) {
+
+                motor_reply_data2_t reply_data;
+                memcpy(reply_data.data, rxFrame.data, sizeof(reply_data.data));
+
+                _telemetry.engine_load = (float)reply_data.engine_load                              / 10.0f;
+                _telemetry.target_load = (float)reply_data.target_load                              / 10.0f;
+                _telemetry.injection_time = reply_data.injection_time;
+                _telemetry.injection_angle = (float)reply_data.injection_angle                      / 10.0f;
+
+            } else if (frame_id_device == TELEM_3) {
+
+                motor_reply_data3_t reply_data;
+                memcpy(reply_data.data, rxFrame.data, sizeof(reply_data.data));
+
+                _telemetry.ignition_spacing_angle = (float)reply_data.ignition_spacing_angle        / 10.0f;
+                _telemetry.lambda_correction = (float)reply_data.lambda_correction                  / 10.0f;
+                _telemetry.lambda_target = reply_data.lambda_target;
+                _telemetry.injector_load = reply_data.injector_load;
+
+            } else if (frame_id_device == TELEM_4) {
+
+                motor_reply_data4_t reply_data;
+                memcpy(reply_data.data, rxFrame.data, sizeof(reply_data.data));
+
+                _telemetry.ecu_v = (float)reply_data.ecu_v                                          / 10.0f;
+                _telemetry.ecu_temp = (float)reply_data.ecu_temp                                    / 10.0f;
+                _telemetry.air_pressure = reply_data.air_pressure;
+                _telemetry.fuel_con = (float)reply_data.fuel_con / 1000.0f;
+
+            } else if (frame_id_device == TELEM_5) {
+
+                motor_reply_data5_t reply_data;
+                memcpy(reply_data.data, rxFrame.data, sizeof(reply_data.data));
+
+                _telemetry.engine_temp = (float)reply_data.engine_temp                              / 10.0f;
+                _telemetry.air_temp = (float)reply_data.air_temp                                    / 10.0f;
+                _telemetry.exhaust_temp = (float)reply_data.exhaust_temp                            / 10.0f;
+                _telemetry.oil_temp = (float)reply_data.oil_temp                                    / 10.0f;
+
+            } else if (frame_id_device == TELEM_6) {
+
+                // Error Flags Transmit
+                // Each error flag represents one bit on the 8-byte can frame
+
+                // Byte 1 Error Flags
+                _telemetry.engine_temp_error = rxFrame.data[0]                                  << 0 & 0x80;
+                _telemetry.engine_temp_error_2 = rxFrame.data[0]                                << 1 & 0x80;
+                _telemetry.exhaust_temp_error = rxFrame.data[0]                                 << 2 & 0x80;
+                _telemetry.exhaust_temp_error_2 = rxFrame.data[0]                               << 3 & 0x80;
+                _telemetry.air_temp_error = rxFrame.data[0]                                     << 4 & 0x80;
+                _telemetry.air_pressure_air = rxFrame.data[0]                                   << 5 & 0x80;
+                _telemetry.oil_temp_error = rxFrame.data[0]                                     << 6 & 0x80;
+
+                // Byte 3 Error Flags
+                _telemetry.engine_temp_restriction = rxFrame.data[2]                            << 0 & 0x80;
+                _telemetry.engine_temp_2_restriction = rxFrame.data[2]                          << 1 & 0x80;
+                _telemetry.oil_temp_restriction = rxFrame.data[2]                               << 2 & 0x80;
+
+                // Byte 4 Error Flags
+                _telemetry.engine_temp_sgc_restriction = rxFrame.data[3]                        << 0 & 0x80;
+                _telemetry.engine_temp_2_sgc_restriction = rxFrame.data[3]                      << 1 & 0x80;
+                _telemetry.sgc_engine_temp_sgc_restriction = rxFrame.data[3]                    << 2 & 0x80;
+                _telemetry.sgc_controller_temp_sgc_restriction = rxFrame.data[3]                << 3 & 0x80;
+                _telemetry.oil_temp_sgc_restriction = rxFrame.data[3]                           << 4 & 0x80;
+
+            } else {
+                result = false;
+            }
+
+            if (result) {
+                _motor_info.last_rx_msg_timestamp = timestamp;
             }
         }
     }
@@ -210,12 +268,13 @@ bool AP_PiccoloCAN::write_frame(AP_HAL::CANFrame &out_frame, uint64_t timeout)
 
     bool read_select = false;
     bool write_select = true;
-    
-    bool ret =  _can_iface->select(read_select, write_select, &out_frame, timeout);
-
-    if (!ret || !write_select) {
-        return false;
-    }
+    bool ret;
+    do {
+        ret = _can_iface->select(read_select, write_select, &out_frame, timeout);
+        if (!ret || !write_select) {
+            hal.scheduler->delay_microseconds(50);
+        }
+    } while (!ret || !write_select);
 
     return (_can_iface->send(out_frame, timeout, AP_HAL::CANIface::AbortOnError) == 1);
 }
@@ -230,7 +289,6 @@ bool AP_PiccoloCAN::read_frame(AP_HAL::CANFrame &recv_frame, uint64_t timeout)
     bool read_select = true;
     bool write_select = false;
     bool ret = _can_iface->select(read_select, write_select, nullptr, timeout);
-
     if (!ret || !read_select) {
         // No frame available
         return false;
@@ -257,35 +315,7 @@ void AP_PiccoloCAN::update()
             SRV_Channel::Aux_servo_function_t motor_function = SRV_Channels::get_motor_function(i);
 
             if (SRV_Channels::get_output_pwm(motor_function, output)) {
-
-                _esc_info[i].command = output;
-                _esc_info[i].newCommand = true;
-            }
-        }
-    }
-
-    AP_Logger *logger = AP_Logger::get_singleton();
-
-    // Push received telemtry data into the logging system
-    if (logger && logger->logging_enabled()) {
-
-        WITH_SEMAPHORE(_telem_sem);
-
-        for (uint8_t i = 0; i < PICCOLO_CAN_MAX_NUM_ESC; i++) {
-
-            PiccoloESC_Info_t &esc = _esc_info[i];
-
-            if (esc.newTelemetry) {
-
-                logger->Write_ESC(i, timestamp,
-                                  (int32_t) esc.rpm * 100,
-                                  esc.voltage,
-                                  esc.current,
-                                  (int16_t) esc.fetTemperature,
-                                  0,  // TODO - Accumulated current
-                                  (int16_t) esc.motorTemperature);
-
-                esc.newTelemetry = false;
+                _motor_info.ouput = output;
             }
         }
     }
@@ -294,242 +324,57 @@ void AP_PiccoloCAN::update()
 // send ESC telemetry messages over MAVLink
 void AP_PiccoloCAN::send_esc_telemetry_mavlink(uint8_t mav_chan)
 {
-    // Arrays to store ESC telemetry data
-    uint8_t temperature[4] {};
-    uint16_t voltage[4] {};
-    uint16_t rpm[4] {};
-    uint16_t count[4] {};
-    uint16_t current[4] {};
-    uint16_t totalcurrent[4] {};
+   mavlink_msg_skypower_telem1_send((mavlink_channel_t) mav_chan, _telemetry.rpm, _telemetry.ignition_angle, _telemetry.throttle_angle,
+                                                        _telemetry.lambda, _telemetry.engine_load, _telemetry.target_load, _telemetry.injection_time,
+                                                        _telemetry.injection_angle, _telemetry.ignition_spacing_angle, _telemetry.lambda_correction,
+                                                        _telemetry.lambda_target, _telemetry.injector_load);
 
-    bool dataAvailable = false;
-
-    uint8_t idx = 0;
-
-    WITH_SEMAPHORE(_telem_sem);
-
-    for (uint8_t ii = 0; ii < PICCOLO_CAN_MAX_NUM_ESC; ii++) {
-
-        // Calculate index within storage array
-        idx = (ii % 4);
-
-        PiccoloESC_Info_t &esc = _esc_info[idx];
-
-        // Has the ESC been heard from recently?
-        if (is_esc_present(ii)) {
-            dataAvailable = true;
-
-            temperature[idx] = esc.fetTemperature;
-            voltage[idx] = esc.voltage;
-            current[idx] = esc.current;
-            totalcurrent[idx] = 0;
-            rpm[idx] = esc.rpm;
-            count[idx] = 0;
-        } else {
-            temperature[idx] = 0;
-            voltage[idx] = 0;
-            current[idx] = 0;
-            totalcurrent[idx] = 0;
-            rpm[idx] = 0;
-            count[idx] = 0;
-        }
-
-        // Send ESC telemetry in groups of 4
-        if ((ii % 4) == 3) {
-
-            if (dataAvailable) {
-                if (!HAVE_PAYLOAD_SPACE((mavlink_channel_t) mav_chan, ESC_TELEMETRY_1_TO_4)) {
-                    continue;
-                }
-
-                switch (ii) {
-                case 3:
-                    mavlink_msg_esc_telemetry_1_to_4_send((mavlink_channel_t) mav_chan, temperature, voltage, current, totalcurrent, rpm, count);
-                    break;
-                case 7:
-                    mavlink_msg_esc_telemetry_5_to_8_send((mavlink_channel_t) mav_chan, temperature, voltage, current, totalcurrent, rpm, count);
-                    break;
-                case 11:
-                    mavlink_msg_esc_telemetry_9_to_12_send((mavlink_channel_t) mav_chan, temperature, voltage, current, totalcurrent, rpm, count);
-                    break;
-                default:
-                    break;
-                }
-            }
-
-            dataAvailable = false;
-        }
-    }
+   mavlink_msg_skypower_telem2_send((mavlink_channel_t) mav_chan, _telemetry.ecu_v, _telemetry.ecu_temp, _telemetry.air_pressure, _telemetry.fuel_con,
+                                                        _telemetry.engine_temp, _telemetry.air_temp, _telemetry.exhaust_temp, _telemetry.oil_temp);
 }
 
 
 // send ESC messages over CAN
 void AP_PiccoloCAN::send_esc_messages(void)
 {
-    AP_HAL::CANFrame txFrame;
-
     uint64_t timeout = AP_HAL::micros64() + 1000ULL;
 
-    // No ESCs are selected? Don't send anything
-    if (_esc_bm == 0x00) {
-        return;
-    }
+    // frame_id_device = rxFrame.id & 0x7FF;
+    // frame_id_t id = { { .object_address = 0x500,
+    //                   .source_id = 0,
+    //                   .priority = 0,
+    //                   .unused = 0 } };
 
-    // System is armed - send out ESC commands
+    union test_data {
+        struct PACKED {
+            uint16_t engine_mode;
+            int16_t target_load;
+            uint16_t target_power;
+            uint16_t target_torque;
+        };
+        uint8_t data[8];
+    };
+
+    test_data test_frame;
+
+    test_frame.engine_mode = 0;
+    test_frame.target_load = 59;
+    test_frame.target_power = 30;
+    test_frame.target_torque = 52;
+
     if (hal.util->get_soft_armed()) {
 
-        bool send_cmd = false;
-        int16_t cmd[4] {};
-        uint8_t idx;
+	    engine_control = { ((uint16_t)0x510 & AP_HAL::CANFrame::MaskExtID), test_frame.data, sizeof(test_frame.data) };
 
-        // Transmit bulk command packets to 4x ESC simultaneously
-        for (uint8_t ii = 0; ii < PICCOLO_CAN_MAX_GROUP_ESC; ii++) {
+	    write_frame(engine_control, timeout);
+	} else {
+		test_frame.target_load = 0;
 
-            send_cmd = false;
+		engine_control = { ((uint16_t)0x510 & AP_HAL::CANFrame::MaskExtID), test_frame.data, sizeof(test_frame.data) };
 
-            for (uint8_t jj = 0; jj < 4; jj++) {
-
-                idx = (ii * 4) + jj;
-
-                // Skip an ESC if the motor channel is not enabled
-                if (!is_esc_channel_active(idx)) {
-                    continue;
-                }
-
-                /* Check if the ESC is software-inhibited.
-                 * If so, send a message to enable it.
-                 */
-                if (is_esc_present(idx) && !is_esc_enabled(idx)) {
-                    encodeESC_EnablePacket(&txFrame);
-                    txFrame.id |= (idx + 1);
-                    write_frame(txFrame, timeout);
-                }
-                else if (_esc_info[idx].newCommand) {
-                    send_cmd = true;
-                    cmd[jj] = _esc_info[idx].command;
-                    _esc_info[idx].newCommand = false;
-                } else {
-                    // A command of 0xFFFF is 'out of range' and will be ignored by the corresponding ESC
-                    cmd[jj] = 0xFFFF;
-                }
-            }
-
-            if (send_cmd) {
-                encodeESC_CommandMultipleESCsPacket(
-                    &txFrame,
-                    cmd[0],
-                    cmd[1],
-                    cmd[2],
-                    cmd[3],
-                    (PKT_ESC_SETPOINT_1 + ii)
-                );
-
-                // Broadcast the command to all ESCs
-                txFrame.id |= 0xFF;
-
-                write_frame(txFrame, timeout);
-            }
-        }
-
-    } else {
-        // System is NOT armed - send a "disable" message to all ESCs on the bus
-
-        // Command all ESC into software disable mode
-        encodeESC_DisablePacket(&txFrame);
-
-        // Set the ESC address to the broadcast ID (0xFF)
-        txFrame.id |= 0xFF;
-
-        write_frame(txFrame, timeout);
-    }
+	    write_frame(engine_control, timeout);
+	}
 }
-
-
-// interpret an ESC message received over CAN
-bool AP_PiccoloCAN::handle_esc_message(AP_HAL::CANFrame &frame)
-{
-    uint64_t timestamp = AP_HAL::micros64();
-
-    // The ESC address is the lower byte of the address
-    uint8_t addr = frame.id & 0xFF;
-
-    // Ignore any ESC with node ID of zero
-    if (addr == 0x00) {
-        return false;
-    }
-
-    // Subtract to get the address in memory
-    addr -= 1;
-
-    // Maximum number of ESCs allowed
-    if (addr >= PICCOLO_CAN_MAX_NUM_ESC) {
-        return false;
-    }
-
-    PiccoloESC_Info_t &esc = _esc_info[addr];
-
-    bool result = true;
-
-    /*
-     * The STATUS_A packet has slight variations between Gen-1 and Gen-2 ESCs.
-     * We can differentiate between the different versions,
-     * and coerce the "legacy" values into the modern values
-     * Legacy STATUS_A packet variables
-     */
-    ESC_LegacyStatusBits_t legacyStatus;
-    ESC_LegacyWarningBits_t legacyWarnings;
-    ESC_LegacyErrorBits_t legacyErrors;
-
-    // Throw the packet against each decoding routine
-    if (decodeESC_StatusAPacket(&frame, &esc.mode, &esc.status, &esc.setpoint, &esc.rpm)) {
-        esc.newTelemetry = true;
-    } else if (decodeESC_LegacyStatusAPacket(&frame, &esc.mode, &legacyStatus, &legacyWarnings, &legacyErrors, &esc.setpoint, &esc.rpm)) {
-        // The status / warning / error bits need to be converted to modern values
-        // Note: Not *all* of the modern status bits are available in the Gen-1 packet
-        esc.status.hwInhibit = legacyStatus.hwInhibit;
-        esc.status.swInhibit = legacyStatus.swInhibit;
-        esc.status.afwEnabled = legacyStatus.afwEnabled;
-        esc.status.direction = legacyStatus.timeout;
-        esc.status.timeout = legacyStatus.timeout;
-        esc.status.starting = legacyStatus.starting;
-        esc.status.commandSource = legacyStatus.commandSource;
-        esc.status.running = legacyStatus.running;
-
-        // Copy the legacy warning information across
-        esc.warnings.overspeed = legacyWarnings.overspeed;
-        esc.warnings.overcurrent = legacyWarnings.overcurrent;
-        esc.warnings.escTemperature = legacyWarnings.escTemperature;
-        esc.warnings.motorTemperature = legacyWarnings.motorTemperature;
-        esc.warnings.undervoltage = legacyWarnings.undervoltage;
-        esc.warnings.overvoltage = legacyWarnings.overvoltage;
-        esc.warnings.invalidPWMsignal = legacyWarnings.invalidPWMsignal;
-        esc.warnings.settingsChecksum = legacyErrors.settingsChecksum;
-
-        // There are no common error bits between the Gen-1 and Gen-2 ICD
-    } else if (decodeESC_StatusBPacket(&frame, &esc.voltage, &esc.current, &esc.dutyCycle, &esc.escTemperature, &esc.motorTemperature)) {
-        esc.newTelemetry = true;
-    } else if (decodeESC_StatusCPacket(&frame, &esc.fetTemperature, &esc.pwmFrequency, &esc.timingAdvance)) {
-        esc.newTelemetry = true;
-    } else if (decodeESC_WarningErrorStatusPacket(&frame, &esc.warnings, &esc.errors)) {
-        esc.newTelemetry = true;
-    } else if (decodeESC_FirmwarePacketStructure(&frame, &esc.firmware)) {
-        // TODO
-    } else if (decodeESC_AddressPacketStructure(&frame, &esc.address)) {
-        // TODO
-    } else if (decodeESC_EEPROMSettingsPacketStructure(&frame, &esc.eeprom)) {
-        // TODO
-    } else {
-        result = false;
-    }
-
-    if (result) {
-        // Reset the Rx timestamp
-        esc.last_rx_msg_timestamp = timestamp;
-    }
-
-    return result;
-}
-
 
 /**
  * Check if a given ESC channel is "active" (has been configured correctly)
@@ -561,18 +406,18 @@ bool AP_PiccoloCAN::is_esc_present(uint8_t chan, uint64_t timeout_ms)
         return false;
     }
 
-    PiccoloESC_Info_t &esc = _esc_info[chan];
+    UASGS_Info_t &motor = _motor_info;
 
     // No messages received from this ESC
-    if (esc.last_rx_msg_timestamp == 0) {
+    if (motor.last_rx_msg_timestamp == 0) {
         return false;
     }
 
     uint64_t now = AP_HAL::micros64();
 
-    uint64_t timeout_us = timeout_ms * 1000ULL;
+    uint64_t timeout_us = timeout_ms * 1000;
 
-    if (now > (esc.last_rx_msg_timestamp + timeout_us)) {
+    if (now > (motor.last_rx_msg_timestamp + timeout_us)) {
         return false;
     }
 
@@ -585,18 +430,8 @@ bool AP_PiccoloCAN::is_esc_present(uint8_t chan, uint64_t timeout_ms)
  */
 bool AP_PiccoloCAN::is_esc_enabled(uint8_t chan)
 {
-    if (chan >= PICCOLO_CAN_MAX_NUM_ESC) {
-        return false;
-    }
-
     // If the ESC is not present, we cannot determine if it is enabled or not
     if (!is_esc_present(chan)) {
-        return false;
-    }
-
-    PiccoloESC_Info_t &esc = _esc_info[chan];
-
-    if (esc.status.hwInhibit || esc.status.swInhibit) {
         return false;
     }
 
@@ -608,98 +443,8 @@ bool AP_PiccoloCAN::is_esc_enabled(uint8_t chan)
 
 bool AP_PiccoloCAN::pre_arm_check(char* reason, uint8_t reason_len)
 {
-    // Check that each required ESC is present on the bus
-    for (uint8_t ii = 0; ii < PICCOLO_CAN_MAX_NUM_ESC; ii++) {
-
-        // Skip any ESC channels where the motor channel is not enabled
-        if (is_esc_channel_active(ii)) {
-
-            if (!is_esc_present(ii)) {
-                snprintf(reason, reason_len, "ESC %u not detected", ii + 1);
-                return false;
-            }
-
-            PiccoloESC_Info_t &esc = _esc_info[ii];
-
-            if (esc.status.hwInhibit) {
-                snprintf(reason, reason_len, "ESC %u is hardware inhibited", (ii + 1));
-                return false;
-            }
-        }
-    }
-
     return true;
 }
-
-
-/* Piccolo Glue Logic
- * The following functions are required by the auto-generated protogen code.
- */
-
-//! \return the packet data pointer from the packet
-uint8_t* getESCVelocityPacketData(void* pkt)
-{
-    AP_HAL::CANFrame* frame = (AP_HAL::CANFrame*) pkt;
-
-    return (uint8_t*) frame->data;
-}
-
-//! \return the packet data pointer from the packet, const
-const uint8_t* getESCVelocityPacketDataConst(const void* pkt)
-{
-    AP_HAL::CANFrame* frame = (AP_HAL::CANFrame*) pkt;
-
-    return (const uint8_t*) frame->data;
-}
-
-//! Complete a packet after the data have been encoded
-void finishESCVelocityPacket(void* pkt, int size, uint32_t packetID)
-{
-    AP_HAL::CANFrame* frame = (AP_HAL::CANFrame*) pkt;
-
-    if (size > AP_HAL::CANFrame::MaxDataLen) {
-        size = AP_HAL::CANFrame::MaxDataLen;
-    }
-
-    frame->dlc = size;
-
-    /* Encode the CAN ID
-     * 0x07mm20dd
-     * - 07 = ACTUATOR group ID
-     * - mm = Message ID
-     * - 20 = ESC actuator type
-     * - dd = Device ID
-     *
-     * Note: The Device ID (lower 8 bits of the frame ID) will have to be inserted later
-     */
-
-    uint32_t id = (((uint8_t) AP_PiccoloCAN::MessageGroup::ACTUATOR) << 24) |       // CAN Group ID
-                  ((packetID & 0xFF) << 16) |                                       // Message ID
-                  (((uint8_t) AP_PiccoloCAN::ActuatorType::ESC) << 8);              // Actuator type
-
-    // Extended frame format
-    id |= AP_HAL::CANFrame::FlagEFF;
-
-    frame->id = id;
-}
-
-//! \return the size of a packet from the packet header
-int getESCVelocityPacketSize(const void* pkt)
-{
-    AP_HAL::CANFrame* frame = (AP_HAL::CANFrame*) pkt;
-
-    return (int) frame->dlc;
-}
-
-//! \return the ID of a packet from the packet header
-uint32_t getESCVelocityPacketID(const void* pkt)
-{
-    AP_HAL::CANFrame* frame = (AP_HAL::CANFrame*) pkt;
-
-    // Extract the message ID field from the 29-bit ID
-    return (uint32_t) ((frame->id >> 16) & 0xFF);
-}
-
 
 #endif // HAL_PICCOLO_CAN_ENABLE
 
