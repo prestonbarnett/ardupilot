@@ -898,6 +898,8 @@ bool AP_Arming::can_checks(bool report)
                     check_failed(ARMING_CHECK_SYSTEM, report, "TestCAN: No Arming with TestCAN enabled");
                     break;
                 }
+                case AP_CANManager::Driver_Type_EFI_NWPMU:
+                case AP_CANManager::Driver_Type_USD1:
                 case AP_CANManager::Driver_Type_None:
                     break;
             }
@@ -1202,7 +1204,7 @@ bool AP_Arming::arm(AP_Arming::Method method, const bool do_arming_checks)
 }
 
 //returns true if disarming occurred successfully
-bool AP_Arming::disarm(const AP_Arming::Method method)
+bool AP_Arming::disarm(const AP_Arming::Method method, bool do_disarm_checks)
 {
     if (!armed) { // already disarmed
         return false;
