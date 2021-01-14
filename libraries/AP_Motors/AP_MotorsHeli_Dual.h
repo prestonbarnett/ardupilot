@@ -33,13 +33,17 @@
 #define AP_MOTORS_HELI_DUAL_COLLECTIVE2_MAX 1750
 #define AP_MOTORS_HELI_DUAL_COLLECTIVE2_MID 1500
 
+// define starter motor channel
+#define AP_MOTORS_HELI_DUAL_RSCSTARTER                 CH_7
+
 /// @class AP_MotorsHeli_Dual
 class AP_MotorsHeli_Dual : public AP_MotorsHeli {
 public:
     // constructor
     AP_MotorsHeli_Dual(uint16_t loop_rate,
                        uint16_t speed_hz = AP_MOTORS_HELI_SPEED_DEFAULT) :
-        AP_MotorsHeli(loop_rate, speed_hz)
+        AP_MotorsHeli(loop_rate, speed_hz),
+        _starter(SRV_Channel::k_heli_tail_rsc, AP_MOTORS_HELI_DUAL_RSCSTARTER)
     {
         AP_Param::setup_object_defaults(this, var_info);
     };
@@ -116,6 +120,7 @@ protected:
     //  objects we depend upon
     AP_MotorsHeli_Swash        _swashplate1;        // swashplate1
     AP_MotorsHeli_Swash        _swashplate2;        // swashplate2
+    AP_MotorsHeli_RSC          _starter;            // starter
 
     // internal variables
     float _oscillate_angle = 0.0f;                  // cyclic oscillation angle, used by servo_test function
@@ -124,6 +129,7 @@ protected:
     float _roll_test = 0.0f;                        // over-ride for roll output, used by servo_test function
     float _pitch_test = 0.0f;                       // over-ride for pitch output, used by servo_test function
     float _servo_out[8];                            // output value sent to motor
+    bool  _engine_is_started = false;
 
     // parameters
     AP_Int16        _collective2_min;               // Lowest possible servo position for the rear swashplate

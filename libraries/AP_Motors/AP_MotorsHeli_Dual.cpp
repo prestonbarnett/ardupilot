@@ -234,6 +234,7 @@ void AP_MotorsHeli_Dual::set_update_rate( uint16_t speed_hz )
     }
 
     rc_set_freq(mask, _speed_hz);
+    rc().channel(CH_7)->set_range(1000);
 }
 
 // init_outputs
@@ -253,14 +254,16 @@ bool AP_MotorsHeli_Dual::init_outputs()
 
         // set rotor servo range
         _main_rotor.init_servo();
-
+        _starter.init_servo();
     }
 
     // set signal value for main rotor external governor to know when to use autorotation bailout ramp up
     if (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_SETPOINT  ||  _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_PASSTHROUGH) {
         _main_rotor.set_ext_gov_arot_bail(_main_rotor._ext_gov_arot_pct.get());
+        _starter.set_ext_gov_arot_bail(_main_rotor._ext_gov_arot_pct.get());
     } else {
         _main_rotor.set_ext_gov_arot_bail(0);
+        _starter.set_ext_gov_arot_bail(0);
     }
 
     // reset swash servo range and endpoints
@@ -328,7 +331,17 @@ void AP_MotorsHeli_Dual::output_test_seq(uint8_t motor_seq, int16_t pwm)
 // set_desired_rotor_speed
 void AP_MotorsHeli_Dual::set_desired_rotor_speed(float desired_speed)
 {
-    _main_rotor.set_desired_speed(desired_speed);
+    _starter.set_desired_speed((float)rc().channel(CH_7)->get_control_in() * 0.001f);
+
+    if (_starter.get_rotor_speed() > 0.5f || _engine_is_started) {
+        _main_rotor.set_desired_speed(desired_speed);
+    } else {
+         _main_rotor.set_desired_speed(0.0f);
+    }
+
+    if (_starter.get_rotor_speed() > 0.5f) {
+        _engine_is_started = true;
+    }
 }
 
 // set_rotor_rpm - used for governor with speed sensor
@@ -358,11 +371,13 @@ void AP_MotorsHeli_Dual::calculate_armed_scalars()
 
     // set bailout ramp time
     _main_rotor.use_bailout_ramp_time(_heliflags.enable_bailout);
+    _starter.use_bailout_ramp_time(_heliflags.enable_bailout);
 
     // allow use of external governor autorotation bailout window on main rotor
     if (_main_rotor._ext_gov_arot_pct.get() > 0  &&  (_main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_SETPOINT  ||  _main_rotor._rsc_mode.get() == ROTOR_CONTROL_MODE_SPEED_PASSTHROUGH)){
         // RSC only needs to know that the vehicle is in an autorotation if using the bailout window on an external governor
         _main_rotor.set_autorotaion_flag(_heliflags.in_autorotation);
+        _starter.set_autorotaion_flag(_heliflags.in_autorotation);
     }
 }
 
@@ -399,6 +414,14 @@ void AP_MotorsHeli_Dual::calculate_scalars()
 
     // set mode of main rotor controller and trigger recalculation of scalars
     _main_rotor.set_control_mode(static_cast<RotorControlMode>(_main_rotor._rsc_mode.get()));
+
+    _starter.set_control_mode(ROTOR_CONTROL_MODE_SPEED_SETPOINT);
+    _starter.set_ramp_time(15);
+    _starter.set_runup_time(15);
+    _starter.set_critical_speed(_main_rotor._critical_speed.get());
+    _starter.set_idle_output(_main_rotor._idle_output.get());
+    _starter.set_desired_speed(0.0f);
+
     calculate_armed_scalars();
 }
 
@@ -502,7 +525,21 @@ uint16_t AP_MotorsHeli_Dual::get_motor_mask()
 void AP_MotorsHeli_Dual::update_motor_control(RotorControlState state)
 {
     // Send state update to motors
-    _main_rotor.output(state);
+    if (_engine_is_started) {
+        _main_rotor.output(state);
+        if ((float)rc().channel(CH_7)->get_control_in() < 0.1f) {
+            _starter.output(ROTOR_CONTROL_STOP);
+        } else {
+            _starter.output(state);
+        }
+    } else {
+        if (_starter.get_rotor_speed() > 0.5f) {
+            _main_rotor.output(state);
+        } else {
+            _main_rotor.output(ROTOR_CONTROL_STOP);
+        }
+        _starter.output(state);
+    }
 
     if (state == ROTOR_CONTROL_STOP) {
         // set engine run enable aux output to not run position to kill engine when disarmed
